@@ -141,6 +141,66 @@ pub fn zcode_v2_dir() -> R<PathBuf> {
     Ok(zcode_data_base_dir()?.join(".zcode").join("v2"))
 }
 
+/// 重写 ZCode 设备 ID（telemetry-state.json 的 deviceMid）。
+///
+/// 背景：ZCode 首次启动用 randomUUID() 生成 deviceMid 写入 telemetry-state.json，
+/// 之后固定读取，作为 `X-Device-Mid` 头 / `device_mid` 参数发给服务端。
+/// 服务端按这个维度做风控与套餐下发——被标记的 deviceMid 会让 billing/balance
+/// 返回 `plans: []`，ZCode 表现为「当前没有可用模型」。实测：换新 UUID 并重启
+/// ZCode 后，套餐恢复下发。
+///
+/// 注意：运行中的 ZCode 启动时就把 deviceMid 读进内存，改磁盘文件只影响**下一次
+/// 启动**；无感切换（不重启）时新 ID 不会立即生效，需要重启 ZCode。
+pub fn rotate_device_mid() -> R<String> {
+    let new_mid = random_uuid_v4();
+    // telemetry-state.json 跟 setting.json 一样固定在 home 设置目录；若用户自定义了
+    // dataBaseDir，则数据目录下的同名文件也一并更新（两个位置相同则去重）。
+    let mut targets: Vec<PathBuf> = Vec::new();
+    if let Ok(p) = zcode_settings_dir() {
+        targets.push(p.join("telemetry-state.json"));
+    }
+    if let Ok(p) = zcode_v2_dir() {
+        let p = p.join("telemetry-state.json");
+        if !targets.contains(&p) {
+            targets.push(p);
+        }
+    }
+    for path in &targets {
+        if let Some(parent) = path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        // 保留文件里其它字段（如 lastDailyActiveDate），只替换 deviceMid
+        let mut value: Value = fs::read_to_string(path)
+            .ok()
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .unwrap_or_else(|| serde_json::json!({}));
+        if !value.is_object() {
+            value = serde_json::json!({});
+        }
+        value["deviceMid"] = Value::String(new_mid.clone());
+        fs::write(path, serde_json::to_vec_pretty(&value)?)?;
+    }
+    Ok(new_mid)
+}
+
+/// 生成 UUID v4（rand 16 字节 → 设置 version/variant 位 → 8-4-4-4-12 格式）。
+fn random_uuid_v4() -> String {
+    use rand::RngCore;
+    let mut b = [0u8; 16];
+    rand::thread_rng().fill_bytes(&mut b);
+    b[6] = (b[6] & 0x0f) | 0x40; // version 4
+    b[8] = (b[8] & 0x3f) | 0x80; // variant 10xx
+    let hex: String = b.iter().map(|x| format!("{:02x}", x)).collect();
+    format!(
+        "{}-{}-{}-{}-{}",
+        &hex[0..8],
+        &hex[8..12],
+        &hex[12..16],
+        &hex[16..20],
+        &hex[20..32]
+    )
+}
+
 /// setting.json 的完整路径（设置目录，home 基址）。
 pub fn setting_file() -> R<PathBuf> {
     Ok(zcode_settings_dir()?.join("setting.json"))
@@ -1133,6 +1193,13 @@ pub fn switch_to(id: String) -> R<Profile> {
         if let Ok(cache) = zcode_v2_dir().map(|d| d.join("coding-plan-cache.json")) {
             let _ = fs::remove_file(&cache);
         }
+    }
+
+    // 换新设备 ID：服务端按 telemetry-state.json 的 deviceMid 做风控/套餐下发，
+    // 被标记的 deviceMid 会让 ZCode 显示「当前没有可用模型」。切号时换新 UUID，
+    // 新值在 ZCode 下次启动（autoRestart / 手动重启）后生效。
+    if let Err(e) = rotate_device_mid() {
+        eprintln!("[switch_to] rotate deviceMid 失败：{}", e);
     }
 
     if should_refresh_zcode_balance {

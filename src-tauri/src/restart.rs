@@ -105,6 +105,16 @@ pub fn restart_zcode() -> R<()> {
     kill_all_zcode();
     thread::sleep(Duration::from_millis(800));
 
+    // 3.5 换新设备 ID + 清权益缓存：必须在拉起新实例之前写盘，让 ZCode 以新
+    // deviceMid 启动并按新设备重新拉套餐/权益（服务端按 deviceMid 做风控与套餐
+    // 下发，被标记的设备 ID 会导致「当前没有可用模型」）。
+    if let Err(e) = crate::profile::rotate_device_mid() {
+        eprintln!("[restart_zcode] rotate deviceMid 失败：{}", e);
+    }
+    if let Ok(cache) = crate::profile::zcode_v2_dir().map(|d| d.join("coding-plan-cache.json")) {
+        let _ = fs::remove_file(&cache);
+    }
+
     // 4. 重启：有快捷方式就用它的 target + args；否则回落到 exe 直拉。
     if let Some(sc) = preferred {
         let target = if sc.target.trim().is_empty() {
