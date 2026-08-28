@@ -10,7 +10,7 @@
 //! Windows 通过 PowerShell 的 WScript.Shell COM 读写 .lnk（免新增依赖）；
 //! macOS 的 .lnk 不存在，相关能力返回空值（前端在 macOS 上走别的分支）。
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::profile::AppError;
 
@@ -18,7 +18,7 @@ type R<T> = std::result::Result<T, AppError>;
 
 pub const REMOTE_DEBUG_FLAG: &str = "--remote-debugging-port=9229";
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ShortcutInfo {
     pub path: String,
     pub target: String,
