@@ -44,7 +44,16 @@ pub fn disable_remote_debug() -> R<usize> {
 
 /// 重启 ZCode 时优先使用的增强启动入口：带 `--remote-debugging-port` 的快捷方式优先。
 pub fn find_preferred_shortcut() -> Option<ShortcutInfo> {
-    find_preferred_impl()
+    find_preferred_impl().map(|mut sc| {
+        sc.has_flag |= has_remote_debug_arg(&sc.arguments);
+        sc
+    })
+}
+
+fn has_remote_debug_arg(arguments: &str) -> bool {
+    arguments.split_whitespace().any(|tok| {
+        tok == REMOTE_DEBUG_FLAG || tok.starts_with("--remote-debugging-port=")
+    })
 }
 
 // --------------------------------------------------------------------------- //
@@ -91,7 +100,7 @@ Get-ChildItem -Path $dirs -Filter *.lnk -Recurse -ErrorAction SilentlyContinue |
     $total++
     if ($lnk.Arguments -match '--remote-debugging-port') { $already++ }
     else {
-      $lnk.Arguments = ($lnk.Arguments + ' --remote-debugging-port=9229').Trim()
+      $lnk.Arguments = ($lnk.Arguments + ' __REMOTE_DEBUG_FLAG__').Trim()
       $lnk.Save()
       $modified++
     }
@@ -168,7 +177,8 @@ fn scan_impl() -> R<Vec<ShortcutInfo>> {
 
 #[cfg(windows)]
 fn enable_impl() -> R<(usize, usize, usize)> {
-    let text = run_ps_script(ENABLE_SCRIPT)?;
+    let script = ENABLE_SCRIPT.replace("__REMOTE_DEBUG_FLAG__", REMOTE_DEBUG_FLAG);
+    let text = run_ps_script(&script)?;
     let value: serde_json::Value =
         serde_json::from_str(&text).map_err(|e| AppError::Msg(format!("解析结果失败：{}", e)))?;
     let get = |key: &str| value.get(key).and_then(|v| v.as_u64()).unwrap_or(0) as usize;
