@@ -16,12 +16,21 @@ jobs:
         include:
           - platform: windows-latest
             args: ""
+          # Mac 包必须在 macOS 上构建（Tauri 不支持交叉编译）：
+          # universal-apple-darwin = 同时产出 Apple Silicon (arm64) + Intel (x86_64) 的 .app/.dmg
+          - platform: macos-latest
+            args: "--target universal-apple-darwin"
 
     runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@v5
 
       - uses: dtolnay/rust-toolchain@stable
+
+      # macOS universal 构建需要同时安装两种架构的 Rust target
+      - name: Install Rust macOS targets
+        if: matrix.platform == 'macos-latest'
+        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
 
       - uses: Swatinem/rust-cache@v2
         with:
