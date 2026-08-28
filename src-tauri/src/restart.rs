@@ -320,6 +320,27 @@ fn kill_all_zcode() {
     }
 }
 
+/// Windows 下隐藏子进程控制台窗口（对 GUI 程序无影响，避免偶发 conhost 闪框）。
+fn apply_no_window(cmd: &mut std::process::Command) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    let _ = cmd;
+}
+
+fn spawn_detached(mut cmd: std::process::Command) -> R<()> {
+    apply_no_window(&mut cmd);
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|e| AppError::Msg(format!("重启 ZCode 失败：{}", e)))?;
+    Ok(())
+}
+
 /// 用给定路径拉起 ZCode（独立进程，不阻塞）。
 fn spawn_zcode(exe_path: &str) -> R<()> {
     use std::process::Command;
@@ -327,26 +348,14 @@ fn spawn_zcode(exe_path: &str) -> R<()> {
     #[cfg(target_os = "macos")]
     {
         let app = macos_app_bundle(exe_path).unwrap_or_else(|| PathBuf::from(exe_path));
-        Command::new("/usr/bin/open")
-            .arg("-n")
-            .arg(app)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .map_err(|e| AppError::Msg(format!("重启 ZCode 失败：{}", e)))?;
-        Ok(())
+        let mut command = Command::new("/usr/bin/open");
+        command.arg("-n").arg(app);
+        spawn_detached(command)
     }
 
     #[cfg(not(target_os = "macos"))]
     {
-        Command::new(exe_path)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .map_err(|e| AppError::Msg(format!("重启 ZCode 失败：{}", e)))?;
-        Ok(())
+        spawn_detached(Command::new(exe_path))
     }
 }
 
@@ -364,25 +373,14 @@ fn spawn_zcode_with_args(exe_path: &str, args: &str) -> R<()> {
         if !tokens.is_empty() {
             command.arg("--args").args(&tokens);
         }
-        command
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .map_err(|e| AppError::Msg(format!("重启 ZCode 失败：{}", e)))?;
-        Ok(())
+        spawn_detached(command)
     }
 
     #[cfg(not(target_os = "macos"))]
     {
-        Command::new(exe_path)
-            .args(&tokens)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .map_err(|e| AppError::Msg(format!("重启 ZCode 失败：{}", e)))?;
-        Ok(())
+        let mut command = Command::new(exe_path);
+        command.args(&tokens);
+        spawn_detached(command)
     }
 }
 
