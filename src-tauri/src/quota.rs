@@ -153,7 +153,11 @@ fn latest_logged_balance_for_current_token(token: &str) -> Option<BillingBalance
     if !current_credentials_match(token) {
         return None;
     }
-    latest_logged_billing_balance()
+    // 日志行本身不带 token，无法确认它属于哪个账号。切号后 credentials.json
+    // 会重新写盘（mtime 更新），因此只接受“当前凭据写盘之后”产生的日志：
+    // 否则直接请求失败时，会把上一个账号的日志余额当成当前账号的兜底数据。
+    let cutoff = current_credentials_modified()?;
+    latest_logged_billing_balance_after(cutoff)
 }
 
 fn current_credentials_match(token: &str) -> bool {
@@ -188,16 +192,40 @@ fn newest_log_files() -> Option<Vec<PathBuf>> {
     Some(files.into_iter().map(|(_, path)| path).take(5).collect())
 }
 
-fn latest_logged_billing_balance() -> Option<BillingBalanceData> {
+fn current_credentials_modified() -> Option<SystemTime> {
+    let home = dirs::home_dir()?;
+    let path = home.join(".zcode").join("v2").join("credentials.json");
+    fs::metadata(path).ok()?.modified().ok()
+}
+
+fn latest_logged_billing_balance_after(cutoff: SystemTime) -> Option<BillingBalanceData> {
     for path in newest_log_files()? {
         let text = fs::read_to_string(path).ok()?;
         for line in text.lines().rev() {
+            if !line.contains("billing/balance 请求完成") {
+                continue;
+            }
+            // 无法解析时间或早于当前凭据写盘：视为上一个账号的数据，跳过
+            match logged_line_time(line) {
+                Some(t) if t >= cutoff => {}
+                _ => continue,
+            }
             if let Some(data) = parse_logged_balance_line(line) {
                 return Some(data);
             }
         }
     }
     None
+}
+
+/// 解析日志行前缀的时间戳：`[2026-07-07 08:52:01.399] [info] ...`。
+fn logged_line_time(line: &str) -> Option<SystemTime> {
+    let inner = line.strip_prefix('[')?;
+    let end = inner.find(']')?;
+    let naive = chrono::NaiveDateTime::parse_from_str(&inner[..end], "%Y-%m-%d %H:%M:%S%.3f").ok()?;
+    use chrono::TimeZone;
+    let local = chrono::Local.from_local_datetime(&naive).single()?;
+    Some(local.with_timezone(&chrono::Utc).into())
 }
 
 fn parse_logged_balance_line(line: &str) -> Option<BillingBalanceData> {
@@ -408,5 +436,23 @@ mod tests {
         let data = parse_logged_balance_line(line).unwrap();
         assert_eq!(data.plans.len(), 1);
         assert_eq!(data.balances.len(), 2);
+    }
+
+    #[test]
+    fn logged_line_time_parses_prefix_timestamp() {
+        let line = r#"[2026-07-07 08:52:01.399] [info] [usage-stats] billing/balance 请求完成 {}"#;
+        let t = logged_line_time(line).expect("应能解析日志行时间戳");
+        let secs = t
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("时间戳应晚于 Unix 纪元")
+            .as_secs();
+        // 2026-07-07 的 Unix 秒约在 1.78e9，取宽区间防时区偏差
+        assert!(secs > 1_780_000_000 && secs < 1_790_000_000, "secs={secs}");
+    }
+
+    #[test]
+    fn logged_line_time_rejects_unparsable_lines() {
+        assert!(logged_line_time("没有时间戳前缀的日志行").is_none());
+        assert!(logged_line_time("[not-a-date] [info] billing/balance 请求完成 {}").is_none());
     }
 }

@@ -583,13 +583,14 @@ export const useStore = create<AppState>((set, get) => {
       } else {
         toast(t.switchedManualNotice.replace("{name}", r.name), "success");
       }
+      // 切号后立即重拉该账号额度：即使有本地缓存也刷新，
+      // 避免卡片/悬浮窗继续显示切换前的旧快照（甚至上一个账号的数据）
+      await get().refreshQuota(id);
       if (!hasDisplayableQuota(get().quotas[id])) {
-        set((s) => ({ loadingQuota: { ...s.loadingQuota, [id]: true } }));
-        for (let attempt = 0; attempt < 10; attempt += 1) {
-          if (attempt > 0) {
-            set((s) => ({ loadingQuota: { ...s.loadingQuota, [id]: true } }));
-            await delay(1000);
-          }
+        // 仍然拿不到数据（接口限流/超时等）：最多重试 9 次，每次间隔 1 秒
+        for (let attempt = 0; attempt < 9; attempt += 1) {
+          set((s) => ({ loadingQuota: { ...s.loadingQuota, [id]: true } }));
+          await delay(1000);
           await get().refreshQuota(id);
           if (hasDisplayableQuota(get().quotas[id])) break;
         }
