@@ -1,3 +1,4 @@
+import { findModelBalance } from "../lib/glm52";
 import type { ProfileView, QuotaInfo } from "../lib/api";
 
 /** 悬浮胶囊窗口基准尺寸（App 按 scale 缩放窗口大小）。 */
@@ -35,6 +36,8 @@ interface FloatingCapsuleProps {
   profiles: ProfileView[];
   quotas: Record<string, QuotaInfo>;
   thresholdWan: number;
+  /** 自动切号判定模型，额度速览与低额度标记跟随同一口径 */
+  autoSwitchModel: string;
   language: string;
   scale: number;
   resizerOpen: boolean;
@@ -43,11 +46,12 @@ interface FloatingCapsuleProps {
   onClose: () => void;
 }
 
-/** 简化版悬浮胶囊：账号池 GLM-5.3 剩余额度速览 + 缩放调节 + 关闭。 */
+/** 简化版悬浮胶囊：账号池按判定模型的剩余额度速览 + 缩放调节 + 关闭。 */
 export default function FloatingCapsule({
   profiles,
   quotas,
   thresholdWan,
+  autoSwitchModel,
   language,
   scale,
   resizerOpen,
@@ -86,7 +90,7 @@ export default function FloatingCapsule({
       <div className="flex-1 space-y-1 overflow-auto px-3 py-1">
         {profiles.map((p) => {
           const quota = quotas[p.id];
-          const glm = quota?.balances.find((b) => b.show_name.includes("5.3"));
+          const glm = findModelBalance(quota, autoSwitchModel);
           const low =
             !!glm && glm.remaining_units < thresholdWan * 10000;
           return (

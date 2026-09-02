@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import {
   Download,
@@ -9,6 +9,7 @@ import {
   Power,
   Zap,
   Clock,
+  Cpu,
   Moon,
   Sun,
   Check,
@@ -19,6 +20,7 @@ import { relaunch } from "@tauri-apps/plugin-process";
 import { check, type DownloadEvent } from "@tauri-apps/plugin-updater";
 import { useStore, type Theme } from "../store";
 import { api } from "../lib/api";
+import { collectModelNames, normalizeModelName } from "../lib/glm52";
 import { formatText, getTexts, type Language } from "../i18n";
 import { UpdateModal } from "./Modal";
 
@@ -336,6 +338,9 @@ export default function SettingsPanel() {
     setGlm52AutoSwitchEnabled,
     glm52AutoSwitchThresholdWan,
     setGlm52AutoSwitchThresholdWan,
+    autoSwitchModel,
+    setAutoSwitchModel,
+    quotas,
     autoRestart,
     setAutoRestart,
     tryNoRestartSwitch,
@@ -350,6 +355,20 @@ export default function SettingsPanel() {
   const t = getTexts(language);
 
   const setUpdateAvailable = useStore((s) => s.setUpdateAvailable);
+
+  // 判定模型选项来自已刷新到的额度条目；当前选中值不在其中时置顶补上，
+  // 保证 select 始终能正确高亮（例如额度还没拉到、或旧条目已消失）。
+  const autoSwitchModelOptions = useMemo(() => {
+    const options = collectModelNames(quotas);
+    const selectedKey = normalizeModelName(autoSwitchModel);
+    return options.some((name) => normalizeModelName(name) === selectedKey)
+      ? options
+      : [autoSwitchModel, ...options];
+  }, [quotas, autoSwitchModel]);
+  const autoSwitchModelValue =
+    autoSwitchModelOptions.find(
+      (name) => normalizeModelName(name) === normalizeModelName(autoSwitchModel)
+    ) ?? autoSwitchModel;
 
   const [version, setVersion] = useState("v 1.1.6");
   const [checkingUpdate, setCheckingUpdate] = useState(false);
@@ -515,6 +534,24 @@ export default function SettingsPanel() {
           on={glm52AutoSwitchEnabled}
           onClick={() => setGlm52AutoSwitchEnabled(!glm52AutoSwitchEnabled)}
         />
+      </Row>
+
+      <Row
+        icon={<Cpu size={15} />}
+        title={t.glmModelTitle}
+        desc={t.glmModelDesc}
+      >
+        <select
+          value={autoSwitchModelValue}
+          onChange={(e) => setAutoSwitchModel(e.currentTarget.value)}
+          className="focus-ring h-8 max-w-44 rounded-lg border border-base-border bg-base-card px-2 text-sm font-semibold text-text-primary outline-none transition hover:bg-base-cardhover"
+        >
+          {autoSwitchModelOptions.map((name) => (
+            <option key={name} value={name}>
+              {name}
+            </option>
+          ))}
+        </select>
       </Row>
 
       <Row

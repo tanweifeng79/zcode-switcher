@@ -9,8 +9,8 @@ import {
   type ProxyStatus,
   type QuotaInfo,
 } from "./lib/api";
-import { glm52Remaining } from "./lib/glm52";
-import { getTexts, type Language } from "./i18n";
+import { DEFAULT_AUTO_SWITCH_MODEL, modelRemaining } from "./lib/glm52";
+import { formatText, getTexts, type Language } from "./i18n";
 
 export type ToastKind = "info" | "success" | "error" | "warn";
 export type Theme = "dark" | "light";
@@ -61,6 +61,8 @@ interface AppState {
   glm52AutoSwitchEnabled: boolean;
   /** 自动切换阈值，单位：万 */
   glm52AutoSwitchThresholdWan: number;
+  /** 自动切换的判定模型：按该模型的剩余额度决定是否切号 */
+  autoSwitchModel: string;
   autoRestart: boolean;
   tryNoRestartSwitch: boolean;
   theme: Theme;
@@ -101,6 +103,7 @@ interface AppState {
   setActiveQuotaRefreshIntervalMinutes: (v: number) => void;
   setGlm52AutoSwitchEnabled: (v: boolean) => void;
   setGlm52AutoSwitchThresholdWan: (v: number) => void;
+  setAutoSwitchModel: (v: string) => void;
   setAutoRestart: (v: boolean) => void;
   setTryNoRestartSwitch: (v: boolean) => void;
   setTheme: (v: Theme) => void;
@@ -161,11 +164,14 @@ function orderedProfilesForRefresh(
       case "name-desc":
         return b.name.localeCompare(a.name, undefined, { numeric: true });
       case "quota-desc":
-        return (glm52Remaining(state.quotas[b.id]) ?? -1) -
-          (glm52Remaining(state.quotas[a.id]) ?? -1);
+        // 与自动切号同口径：按所选判定模型的剩余额度排序
+        return (modelRemaining(state.quotas[b.id], state.autoSwitchModel) ?? -1) -
+          (modelRemaining(state.quotas[a.id], state.autoSwitchModel) ?? -1);
       case "quota-asc":
-        return (glm52Remaining(state.quotas[a.id]) ?? Number.MAX_SAFE_INTEGER) -
-          (glm52Remaining(state.quotas[b.id]) ?? Number.MAX_SAFE_INTEGER);
+        return (modelRemaining(state.quotas[a.id], state.autoSwitchModel) ??
+          Number.MAX_SAFE_INTEGER) -
+          (modelRemaining(state.quotas[b.id], state.autoSwitchModel) ??
+            Number.MAX_SAFE_INTEGER);
       case "expiry-asc":
         return (state.quotas[a.id]?.plan_ends_at ?? Number.MAX_SAFE_INTEGER) -
           (state.quotas[b.id]?.plan_ends_at ?? Number.MAX_SAFE_INTEGER);
@@ -242,6 +248,14 @@ function loadGlm52AutoSwitchEnabled(): boolean {
     return localStorage.getItem("zcs:glm52AutoSwitchEnabled") === "1";
   } catch {
     return false;
+  }
+}
+function loadAutoSwitchModel(): string {
+  try {
+    const v = localStorage.getItem("zcs:autoSwitchModel")?.trim();
+    return v || DEFAULT_AUTO_SWITCH_MODEL;
+  } catch {
+    return DEFAULT_AUTO_SWITCH_MODEL;
   }
 }
 function clampGlm52ThresholdWan(n: number): number {
@@ -410,7 +424,10 @@ async function maybeSwitchGlm52Account(state: AppState) {
   const activeQuota = active ? state.quotas[active.id] : undefined;
   if (!active || !activeQuota || activeQuota.error) return;
 
-  const activeRemaining = glm52Remaining(activeQuota);
+  // 判定口径由用户在设置里选定：只看所选模型的额度条目，
+  // 账号没有该模型的条目时视为无数据（null），不参与判定和候选。
+  const model = state.autoSwitchModel;
+  const activeRemaining = modelRemaining(activeQuota, model);
   const threshold = state.glm52AutoSwitchThresholdWan * 10_000;
   if (activeRemaining === null || activeRemaining >= threshold) return;
 
@@ -419,7 +436,7 @@ async function maybeSwitchGlm52Account(state: AppState) {
     .map((profile) => ({
       profile,
       quota: state.quotas[profile.id],
-      remaining: glm52Remaining(state.quotas[profile.id]),
+      remaining: modelRemaining(state.quotas[profile.id], model),
     }))
     .filter(
       (item) =>
@@ -434,10 +451,10 @@ async function maybeSwitchGlm52Account(state: AppState) {
     if (now - lastGlm52NoCandidateAt > 60_000) {
       lastGlm52NoCandidateAt = now;
       state.toast(
-        t.glmNoCandidate.replace(
-          "{threshold}",
-          String(state.glm52AutoSwitchThresholdWan)
-        ),
+        formatText(t.glmNoCandidate, {
+          model,
+          threshold: state.glm52AutoSwitchThresholdWan,
+        }),
         "warn"
       );
     }
@@ -447,9 +464,11 @@ async function maybeSwitchGlm52Account(state: AppState) {
   glm52AutoSwitching = true;
   try {
     state.toast(
-      t.glmAutoSwitching
-        .replace("{threshold}", String(state.glm52AutoSwitchThresholdWan))
-        .replace("{name}", candidate.profile.name),
+      formatText(t.glmAutoSwitching, {
+        model,
+        threshold: state.glm52AutoSwitchThresholdWan,
+        name: candidate.profile.name,
+      }),
       "info"
     );
     await state.switchTo(candidate.profile.id);
@@ -493,6 +512,7 @@ export const useStore = create<AppState>((set, get) => {
     scheduledRefreshSeq: 0,
     glm52AutoSwitchEnabled: loadGlm52AutoSwitchEnabled(),
     glm52AutoSwitchThresholdWan: loadGlm52AutoSwitchThresholdWan(),
+    autoSwitchModel: loadAutoSwitchModel(),
     autoRestart: initialAutoRestart,
     tryNoRestartSwitch: initialTryNoRestartSwitch,
     theme: initialTheme,
@@ -856,6 +876,16 @@ export const useStore = create<AppState>((set, get) => {
       /* ignore */
     }
     set({ glm52AutoSwitchThresholdWan: wan });
+  },
+
+  setAutoSwitchModel: (v) => {
+    const model = v.trim() || DEFAULT_AUTO_SWITCH_MODEL;
+    try {
+      localStorage.setItem("zcs:autoSwitchModel", model);
+    } catch {
+      /* ignore */
+    }
+    set({ autoSwitchModel: model });
   },
 
   setAutoRestart: (v) => {

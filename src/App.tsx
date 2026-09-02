@@ -94,6 +94,7 @@ export default function App() {
     activeQuotaRefreshIntervalMinutes,
     glm52AutoSwitchEnabled,
     glm52AutoSwitchThresholdWan,
+    autoSwitchModel,
     floatingWindowMode,
     floatingWindowScale,
     theme,
@@ -160,8 +161,8 @@ export default function App() {
   const batchQuotaRefreshDueAt = useRef(0);
   const activeQuotaRefreshDueAt = useRef(0);
   const sortedProfiles = useMemo(
-    () => sortProfiles(profiles, quotas, accountSortMode),
-    [profiles, quotas, accountSortMode]
+    () => sortProfiles(profiles, quotas, accountSortMode, autoSwitchModel),
+    [profiles, quotas, accountSortMode, autoSwitchModel]
   );
   const sortedProfileIds = useMemo(
     () => sortedProfiles.map((profile) => profile.id),
@@ -642,6 +643,7 @@ export default function App() {
         profiles={profiles}
         quotas={quotas}
         thresholdWan={glm52AutoSwitchThresholdWan}
+        autoSwitchModel={autoSwitchModel}
         language={language}
         scale={floatingWindowScale}
         resizerOpen={floatingResizerOpen}
