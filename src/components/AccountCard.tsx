@@ -58,11 +58,18 @@ function describeQuotaError(
     error.includes("429") ||
     error.includes("限流") ||
     lower.includes("too many requests");
+  // ZCode 3.10+ 服务端要求客户端签名，裸 token 直连返回 400 parameter error；
+  // 这类失败不是网络问题，用固定文案说明接口被限制，避免展示原始报错。
+  const isBlocked =
+    error.includes("状态码 400") || lower.includes("parameter error");
   if (isTimeout) {
     return { text: t.quotaRefreshTimeoutLabel, className: "text-warn" };
   }
   if (isRateLimited) {
     return { text: t.quotaRateLimited, className: "text-warn" };
+  }
+  if (isBlocked) {
+    return { text: t.quotaApiBlocked, className: "text-warn" };
   }
   if (!hasEverHadQuota) {
     return { text: t.quotaNeedLogin, className: "text-warn" };
@@ -71,6 +78,14 @@ function describeQuotaError(
     text: formatText(t.quotaRefreshFailedLabel, { reason: error }),
     className: "text-danger",
   };
+}
+
+/** 快照年龄 → "N 分钟 / N 小时 / N 天" */
+function formatQuotaAge(seconds: number, t: ReturnType<typeof getTexts>): string {
+  const s = Math.max(0, seconds);
+  if (s < 3600) return formatText(t.ageMinutes, { n: Math.max(1, Math.round(s / 60)) });
+  if (s < 86400) return formatText(t.ageHours, { n: Math.round(s / 3600) });
+  return formatText(t.ageDays, { n: Math.round(s / 86400) });
 }
 
 function planBadgeClass(status?: string | null): string {
@@ -152,6 +167,16 @@ function AccountCard({
   const quotaErr = quota?.error
     ? describeQuotaError(quota.error, t, showQuota || profile.active)
     : null;
+  // 刷新失败时卡片仍显示最后一次成功的额度快照：把快照年龄挂在错误文案后，
+  // 避免旧数据被当成实时额度（fetched_at 指向数据真正拉到的时间）。
+  const quotaErrText = quotaErr
+    ? hasQuotaBars && quota?.fetched_at
+      ? quotaErr.text +
+        formatText(t.quotaStaleSuffix, {
+          age: formatQuotaAge(Date.now() / 1000 - quota.fetched_at, t),
+        })
+      : quotaErr.text
+    : "";
   const showQuotaLoading = quotaLoading && !showQuota;
 
   if (!isListView) {
@@ -250,7 +275,7 @@ function AccountCard({
           {showQuotaLoading
             ? t.quotaLoadingLabel
             : quotaErr
-            ? quotaErr.text
+            ? quotaErrText
             : refreshOk
             ? t.quotaRefreshOk
             : "—"}
@@ -507,7 +532,7 @@ function AccountCard({
               className={`text-[11px] font-medium ${quotaErr.className}`}
               title={quota?.error || ""}
             >
-              {quotaErr.text}
+              {quotaErrText}
             </div>
           ) : refreshOk ? (
             <div className="text-[11px] font-medium text-ok">{t.quotaRefreshOk}</div>
@@ -522,7 +547,7 @@ function AccountCard({
           className={`border-t border-base-border/70 pt-2 text-[11px] font-medium ${quotaErr.className}`}
           title={quota?.error || ""}
         >
-          {quotaErr.text}
+          {quotaErrText}
         </div>
       ) : refreshOk ? (
         <div className="border-t border-base-border/70 pt-2 text-[11px] font-medium text-ok">

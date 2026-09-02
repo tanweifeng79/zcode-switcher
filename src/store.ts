@@ -501,6 +501,25 @@ export const useStore = create<AppState>((set, get) => {
       /* ignore */
     }
   }
+  /**
+   * 切号后的额度轮询：先立即刷新一次（即使有本地缓存也刷新，避免卡片/悬浮窗
+   * 继续显示切换前的旧快照），拿不到可展示数据（限流/超时等）再重试最多 9 次、
+   * 每次间隔 1 秒。在后台运行、不占用 busy；期间再次切号会启动新一代轮询，
+   * 旧轮询立即退出，把请求额度让给新账号。
+   */
+  let quotaPollSeq = 0;
+  const pollQuotaAfterSwitch = async (id: string) => {
+    const seq = ++quotaPollSeq;
+    await get().refreshQuota(id);
+    if (hasDisplayableQuota(get().quotas[id])) return;
+    for (let attempt = 0; attempt < 9; attempt += 1) {
+      if (seq !== quotaPollSeq) return;
+      set((s) => ({ loadingQuota: { ...s.loadingQuota, [id]: true } }));
+      await delay(1000);
+      await get().refreshQuota(id);
+      if (hasDisplayableQuota(get().quotas[id])) return;
+    }
+  };
   return {
     profiles: [],
     quotas: loadCachedQuotas(),
@@ -603,18 +622,9 @@ export const useStore = create<AppState>((set, get) => {
       } else {
         toast(t.switchedManualNotice.replace("{name}", r.name), "success");
       }
-      // 切号后立即重拉该账号额度：即使有本地缓存也刷新，
-      // 避免卡片/悬浮窗继续显示切换前的旧快照（甚至上一个账号的数据）
-      await get().refreshQuota(id);
-      if (!hasDisplayableQuota(get().quotas[id])) {
-        // 仍然拿不到数据（接口限流/超时等）：最多重试 9 次，每次间隔 1 秒
-        for (let attempt = 0; attempt < 9; attempt += 1) {
-          set((s) => ({ loadingQuota: { ...s.loadingQuota, [id]: true } }));
-          await delay(1000);
-          await get().refreshQuota(id);
-          if (hasDisplayableQuota(get().quotas[id])) break;
-        }
-      }
+      // 额度刷新放后台，不再握着 busy 等它：限流/超时的重试可能持续十几秒，
+      // 期间要允许立即再次切号（加载动画由 loadingQuota 单独驱动）。
+      void pollQuotaAfterSwitch(id);
       return true;
     } catch (e) {
       get().toast(
@@ -748,7 +758,9 @@ export const useStore = create<AppState>((set, get) => {
           ...s.quotas,
           [id]:
             s.quotas[id]?.balances?.length > 0
-              ? { ...s.quotas[id], error: String(e), fetched_at: Date.now() / 1000 }
+              ? // 保留原 fetched_at：它指向额度数据真正拉到的时间，
+                // 卡片靠它标注"显示的是多久前的缓存"
+                { ...s.quotas[id], error: String(e) }
               : {
                   plan_name: null,
                   plan_description: null,

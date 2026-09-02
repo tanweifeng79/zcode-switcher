@@ -200,7 +200,12 @@ fn current_credentials_modified() -> Option<SystemTime> {
 
 fn latest_logged_billing_balance_after(cutoff: SystemTime) -> Option<BillingBalanceData> {
     for path in newest_log_files()? {
-        let text = fs::read_to_string(path).ok()?;
+        // 日志会混入 NUL 等杂字节，read_to_string 遇到非法 UTF-8 会整体失败，
+        // 必须按字节读取再容错解码；单个文件读失败只跳过，不放弃整个兜底。
+        let Ok(bytes) = fs::read(&path) else {
+            continue;
+        };
+        let text = String::from_utf8_lossy(&bytes);
         for line in text.lines().rev() {
             if !line.contains("billing/balance 请求完成") {
                 continue;
@@ -436,6 +441,25 @@ mod tests {
         let data = parse_logged_balance_line(line).unwrap();
         assert_eq!(data.plans.len(), 1);
         assert_eq!(data.balances.len(), 2);
+    }
+
+    #[test]
+    fn parse_logged_balance_payload_hostlog_v3_10() {
+        // ZCode 3.10.x 的日志行由 host-log 二次包装：双时间戳 + [host] 前缀，
+        // payload 结构为 plans + balances（带 entitlement_id/capabilities 等新字段）。
+        let line = r#"[2026-09-02 21:28:20.763] [info] [pid:28300] [main] [host-log] (local-1) [host] [2026-09-02 21:28:20.763] [pid:37812] [usage-stats] billing/balance 请求完成 {"balanceCount":2,"code":0,"payload":{"code":0,"msg":"","data":{"server_time":1788355701,"plans":[{"plan_id":"zcode-v3-start-plan-0817","name":"ZCode Start Plan","priority":90,"status":"active","ends_at":1788364799}],"balances":[{"entitlement_id":"ent_2_0817_glm_5p3","show_name":"GLM-5.3","total_units":3000000,"used_units":0,"remaining_units":3000000,"available_units":3000000},{"entitlement_id":"ent_2_0817_glm_5p3f","show_name":"GLM-5.3-Flash","total_units":5000000,"used_units":0,"remaining_units":5000000,"available_units":5000000}]}},"success":true,"url":"https://zcode.z.ai/api/v1/zcode-plan/billing/balance?app_version=3.10.2"}"#;
+        let data = parse_logged_balance_line(line).expect("应能解析 host-log 包装的余额行");
+        assert_eq!(data.plans.len(), 1);
+        assert_eq!(data.plans[0].name.as_deref(), Some("ZCode Start Plan"));
+        let balances: Vec<_> = data
+            .balances
+            .into_iter()
+            .filter_map(parse_balance_item)
+            .collect();
+        assert_eq!(balances.len(), 2);
+        assert_eq!(balances[1].show_name, "GLM-5.3-Flash");
+        assert_eq!(balances[1].remaining_units, 5_000_000.0);
+        assert!(logged_line_time(line).is_some(), "应能解析首个时间戳");
     }
 
     #[test]
