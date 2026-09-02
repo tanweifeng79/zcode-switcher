@@ -199,7 +199,8 @@ fn load_known_path() -> Option<String> {
 }
 
 /// 查找运行中的 ZCode 主进程 exe 路径（最先枚举到的那条，通常是主进程）。
-fn find_main_path() -> Option<String> {
+/// macOS 的 zcode_launcher 也用它判断 ZCode 是否正在运行。
+pub(crate) fn find_main_path() -> Option<String> {
     let mut sys = System::new();
     sys.refresh_processes_specifics(
         ProcessesToUpdate::All,
@@ -298,8 +299,8 @@ fn wait_for_app_server(timeout: Duration) -> bool {
     false
 }
 
-/// kill 所有 ZCode 相关进程。
-fn kill_all_zcode() {
+/// kill 所有 ZCode 相关进程（macOS 的 zcode_launcher「增强启动」开启时也会复用）。
+pub(crate) fn kill_all_zcode() {
     let mut sys = System::new();
     sys.refresh_processes_specifics(ProcessesToUpdate::All, true, ProcessRefreshKind::new());
 

@@ -138,7 +138,9 @@ function NoRestartSwitchRow({
         ? IS_MACOS
           ? t.launcherEnhanceStatusAllMac
           : formatText(t.launcherEnhanceStatusAll, { total })
-        : formatText(t.launcherEnhanceStatusPartial, { enabled, total });
+        : IS_MACOS
+          ? t.launcherEnhanceStatusOffMac
+          : formatText(t.launcherEnhanceStatusPartial, { enabled, total });
   }
 
   const desc = `${IS_MACOS ? t.noRestartDescMac : t.noRestartDesc}\n${status}`;

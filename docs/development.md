@@ -26,19 +26,18 @@ npm run tauri build
 
 ## 构建 macOS 安装包
 
-macOS DMG 必须在 Mac 或 GitHub macOS Runner 中构建：
+macOS 包必须在 Mac 或 GitHub macOS Runner 中构建（Tauri 不支持交叉编译），
+对应 `release.yml` 的 `macos-latest` matrix：
 
 ```bash
 npm ci
 npm run tauri build -- \
-  --target aarch64-apple-darwin \
-  --bundles dmg \
-  --config src-tauri/tauri.macos.conf.json
+  --target universal-apple-darwin \
+  --bundles dmg
 ```
 
-GitHub Actions 入口为 `.github/workflows/build-macos.yml`。构建产物位于
-`src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/`，详细说明见
-`docs/macos.md`。
+构建产物位于 `src-tauri/target/universal-apple-darwin/release/bundle/dmg/`，
+同时覆盖 Apple Silicon (arm64) 与 Intel (x86_64)。
 
 ## 本地目录约定
 

@@ -8,7 +8,8 @@
 //!     `--remote-debugging-port=9229` 等参数，无感切换依赖该端口）。
 //!
 //! Windows 用 IShellLink COM 直接读写 .lnk，避免拉起 powershell.exe 闪黑框；
-//! macOS 的 .lnk 不存在，相关能力返回空值（前端在 macOS 上走别的分支）。
+//! macOS 扫描 /Applications、~/Applications 下的 ZCode.app，增强启动状态保存在
+//! Switcher 自己的状态文件里（开启时若 ZCode 在运行会带调试参数重启一次）。
 
 use serde::{Deserialize, Serialize};
 
@@ -292,26 +293,227 @@ fn find_preferred_impl() -> Option<ShortcutInfo> {
 }
 
 // --------------------------------------------------------------------------- //
-// 非 Windows：.lnk 不存在，返回空值（前端在 macOS 上有独立分支，不依赖这些命令）
+// Linux 等其它平台：暂无快捷方式概念，返回空值
 // --------------------------------------------------------------------------- //
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 fn scan_impl() -> R<Vec<ShortcutInfo>> {
     Ok(Vec::new())
 }
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 fn enable_impl() -> R<(usize, usize, usize)> {
     Ok((0, 0, 0))
 }
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 fn disable_impl() -> R<usize> {
     Ok(0)
 }
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 fn find_preferred_impl() -> Option<ShortcutInfo> {
     None
+}
+
+// --------------------------------------------------------------------------- //
+// macOS 实现：没有可改写的 .lnk，「增强启动」状态保存在 Switcher 自己的状态
+// 文件里；开关打开时如果 ZCode 正在运行，由 Switcher 带调试参数重启一次。
+// --------------------------------------------------------------------------- //
+
+#[cfg(target_os = "macos")]
+mod macos {
+    use std::fs;
+    use std::path::PathBuf;
+    use std::process::Stdio;
+    use std::thread;
+    use std::time::Duration;
+
+    use serde::{Deserialize, Serialize};
+
+    use super::{ShortcutInfo, REMOTE_DEBUG_FLAG};
+    use crate::profile::AppError;
+
+    type R<T> = std::result::Result<T, AppError>;
+
+    #[derive(Debug, Default, Serialize, Deserialize)]
+    struct LauncherState {
+        enhanced: bool,
+        #[serde(default)]
+        app_path: Option<String>,
+    }
+
+    fn state_file() -> R<PathBuf> {
+        // 与 restart.rs 的设置文件同目录（home 基址的 .zcode/v2），不随 dataBaseDir 变动
+        Ok(crate::profile::zcode_settings_dir()?
+            .join("zcode-switcher-macos-launcher.json"))
+    }
+
+    fn load_state() -> LauncherState {
+        let Ok(path) = state_file() else {
+            return LauncherState::default();
+        };
+        let Ok(text) = fs::read_to_string(path) else {
+            return LauncherState::default();
+        };
+        serde_json::from_str(&text).unwrap_or_default()
+    }
+
+    fn save_state(state: &LauncherState) -> R<()> {
+        let path = state_file()?;
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(path, serde_json::to_vec_pretty(state)?)?;
+        Ok(())
+    }
+
+    /// 在常见安装位置查找 ZCode.app：/Applications → ~/Applications。
+    /// 优先复用上次发现的路径（校验存在性），找不到时精确名匹配，再大小写不敏感兜底。
+    fn find_zcode_app() -> Option<PathBuf> {
+        let saved = load_state().app_path;
+        if let Some(p) = saved {
+            let path = PathBuf::from(&p);
+            if path.is_dir() {
+                return Some(path);
+            }
+        }
+
+        let mut roots = vec![PathBuf::from("/Applications")];
+        if let Some(home) = dirs::home_dir() {
+            roots.push(home.join("Applications"));
+        }
+
+        for root in roots {
+            let Ok(entries) = fs::read_dir(&root) else {
+                continue;
+            };
+            let mut fuzzy: Option<PathBuf> = None;
+            for entry in entries.flatten() {
+                let raw = entry.file_name();
+                let name = raw.to_string_lossy();
+                if !name.to_lowercase().ends_with(".app") {
+                    continue;
+                }
+                if name == "ZCode.app" {
+                    return Some(entry.path());
+                }
+                if name.trim_end_matches(".app").to_lowercase() == "zcode" && fuzzy.is_none() {
+                    fuzzy = Some(entry.path());
+                }
+            }
+            if let Some(p) = fuzzy {
+                return Some(p);
+            }
+        }
+        None
+    }
+
+    fn is_zcode_running() -> bool {
+        crate::restart::find_main_path().is_some()
+    }
+
+    fn kill_running_zcode() {
+        crate::restart::kill_all_zcode();
+        thread::sleep(Duration::from_millis(800));
+    }
+
+    /// 带 `--remote-debugging-port=9229` 拉起 ZCode.app（对应前端“带调试参数重新启动”）。
+    fn spawn_zcode_with_debug_flag(app: &PathBuf) -> R<()> {
+        std::process::Command::new("/usr/bin/open")
+            .arg("-n")
+            .arg(app)
+            .arg("--args")
+            .arg(REMOTE_DEBUG_FLAG)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|e| AppError::Msg(format!("启动 ZCode 失败：{}", e)))?;
+        Ok(())
+    }
+
+    fn shortcut_info(app: &PathBuf, enhanced: bool) -> ShortcutInfo {
+        let target = app.to_string_lossy().into_owned();
+        ShortcutInfo {
+            arguments: if enhanced {
+                REMOTE_DEBUG_FLAG.to_string()
+            } else {
+                String::new()
+            },
+            has_flag: enhanced,
+            path: target.clone(),
+            target,
+        }
+    }
+
+    pub fn scan_impl() -> R<Vec<ShortcutInfo>> {
+        match find_zcode_app() {
+            Some(app) => {
+                let enhanced = load_state().enhanced;
+                Ok(vec![shortcut_info(&app, enhanced)])
+            }
+            None => Ok(Vec::new()),
+        }
+    }
+
+    pub fn enable_impl() -> R<(usize, usize, usize)> {
+        let Some(app) = find_zcode_app() else {
+            return Ok((0, 0, 0));
+        };
+        let mut state = load_state();
+        if state.enhanced {
+            return Ok((0, 1, 1));
+        }
+        state.enhanced = true;
+        state.app_path = Some(app.to_string_lossy().into_owned());
+        save_state(&state)?;
+
+        // ZCode 正在运行时带调试参数重启一次让参数立即生效；未运行则只记录状态，
+        // 之后由 Switcher 重启 ZCode 时自然带上参数（见 restart.rs 的 preferred 分支）。
+        if is_zcode_running() {
+            kill_running_zcode();
+            spawn_zcode_with_debug_flag(&app)?;
+        }
+        Ok((1, 0, 1))
+    }
+
+    pub fn disable_impl() -> R<usize> {
+        let mut state = load_state();
+        if !state.enhanced {
+            return Ok(0);
+        }
+        state.enhanced = false;
+        save_state(&state)?;
+        Ok(1)
+    }
+
+    pub fn find_preferred_impl() -> Option<ShortcutInfo> {
+        // 无论是否开启增强启动都返回入口，让 restart.rs 在“ZCode 未运行且没有
+        // 已记录路径”时也能从 ZCode.app 拉起；arguments 仅在增强启动开启时带参数。
+        let app = find_zcode_app()?;
+        let enhanced = load_state().enhanced;
+        Some(shortcut_info(&app, enhanced))
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn scan_impl() -> R<Vec<ShortcutInfo>> {
+    macos::scan_impl()
+}
+
+#[cfg(target_os = "macos")]
+fn enable_impl() -> R<(usize, usize, usize)> {
+    macos::enable_impl()
+}
+
+#[cfg(target_os = "macos")]
+fn disable_impl() -> R<usize> {
+    macos::disable_impl()
+}
+
+#[cfg(target_os = "macos")]
+fn find_preferred_impl() -> Option<ShortcutInfo> {
+    macos::find_preferred_impl()
 }
 
